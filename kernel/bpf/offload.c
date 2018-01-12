@@ -41,6 +41,15 @@ static int bpf_dev_offload_check(struct net_device *netdev)
 	return 0;
 }
 
+static int bpf_dev_offload_check(struct net_device *netdev)
+{
+	if (!netdev)
+		return -EINVAL;
+	if (!netdev->netdev_ops->ndo_bpf)
+		return -EOPNOTSUPP;
+	return 0;
+}
+
 int bpf_prog_offload_init(struct bpf_prog *prog, union bpf_attr *attr)
 {
 	struct bpf_prog_offload *offload;

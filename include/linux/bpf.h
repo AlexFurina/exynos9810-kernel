@@ -504,19 +504,20 @@ struct bpf_prog_array {
 	struct bpf_prog_array_item items[0];
 };
 
+struct bpf_prog_array __rcu *bpf_prog_array_alloc(u32 prog_cnt, gfp_t flags);
 struct bpf_prog_array *bpf_prog_array_alloc(u32 prog_cnt, gfp_t flags);
-void bpf_prog_array_free(struct bpf_prog_array __rcu *progs);
-int bpf_prog_array_length(struct bpf_prog_array __rcu *progs);
+void bpf_prog_array_free(struct bpf_prog_array *progs);
+int bpf_prog_array_length(struct bpf_prog_array *progs);
 bool bpf_prog_array_is_empty(struct bpf_prog_array *array);
-int bpf_prog_array_copy_to_user(struct bpf_prog_array __rcu *progs,
+int bpf_prog_array_copy_to_user(struct bpf_prog_array *progs,
 				__u32 __user *prog_ids, u32 cnt);
 				
-void bpf_prog_array_delete_safe(struct bpf_prog_array __rcu *progs,
+void bpf_prog_array_delete_safe(struct bpf_prog_array *progs,
 				struct bpf_prog *old_prog);
-int bpf_prog_array_copy_info(struct bpf_prog_array __rcu *array,
+int bpf_prog_array_copy_info(struct bpf_prog_array *array,
  			__u32 __user *prog_ids, u32 request_cnt,
  			__u32 __user *prog_cnt);
-int bpf_prog_array_copy(struct bpf_prog_array __rcu *old_array,
+int bpf_prog_array_copy(struct bpf_prog_array *old_array,
 			struct bpf_prog *exclude_prog,
 			struct bpf_prog *include_prog,
 			struct bpf_prog_array **new_array);
@@ -551,9 +552,6 @@ _out:							\
 #ifdef CONFIG_BPF_SYSCALL
 DECLARE_PER_CPU(int, bpf_prog_active);
 
-extern const struct file_operations bpf_map_fops;
-extern const struct file_operations bpf_prog_fops;
-
 #define BPF_PROG_TYPE(_id, _name) \
 	extern const struct bpf_prog_ops _name ## _prog_ops; \
 	extern const struct bpf_verifier_ops _name ## _verifier_ops;
@@ -566,6 +564,9 @@ extern const struct file_operations bpf_prog_fops;
 extern const struct bpf_prog_ops bpf_offload_prog_ops;
 extern const struct bpf_verifier_ops tc_cls_act_analyzer_ops;
 extern const struct bpf_verifier_ops xdp_analyzer_ops;
+extern const struct file_operations bpf_map_fops;
+extern const struct file_operations bpf_prog_fops;
+
 struct bpf_prog *bpf_prog_get(u32 ufd);
 struct bpf_prog *bpf_prog_get_type_dev(u32 ufd, enum bpf_prog_type type,
 				       bool attach_drv);
@@ -650,11 +651,6 @@ void bpf_patch_call_args(struct bpf_insn *insn, u32 stack_depth);
 
 struct bpf_prog *bpf_prog_get_type_path(const char *name, enum bpf_prog_type type);
 
-static inline bool unprivileged_ebpf_enabled(void)
-{
-	return !sysctl_unprivileged_bpf_disabled;
-}
-
 /* Map specifics */
 struct net_device  *__dev_map_lookup_elem(struct bpf_map *map, u32 key);
 struct net_device  *__dev_map_hash_lookup_elem(struct bpf_map *map, u32 key);
@@ -731,11 +727,6 @@ static inline int __bpf_prog_charge(struct user_struct *user, u32 pages)
 
 static inline void __bpf_prog_uncharge(struct user_struct *user, u32 pages)
 {
-}
-
-static inline bool unprivileged_ebpf_enabled(void)
-{
-	return false;
 }
 
 static inline struct net_device  *__dev_map_lookup_elem(struct bpf_map *map,

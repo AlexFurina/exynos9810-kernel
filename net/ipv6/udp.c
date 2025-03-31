@@ -205,7 +205,7 @@ static struct sock *udp6_lib_lookup2(struct net *net,
 struct sock *__udp6_lib_lookup(struct net *net,
 				      const struct in6_addr *saddr, __be16 sport,
 				      const struct in6_addr *daddr, __be16 dport,
-				      int dif, struct udp_table *udptable,
+				      int dif, int sdif, struct udp_table *udptable,
 				      struct sk_buff *skb)
 {
 	struct sock *sk, *result;
@@ -284,7 +284,7 @@ static struct sock *__udp6_lib_lookup_skb(struct sk_buff *skb,
 		return sk;
 	return __udp6_lib_lookup(dev_net(skb->dev), &iph->saddr, sport,
 				 &iph->daddr, dport, inet6_iif(skb),
-				 udptable, skb);
+				 inet6_sdif(skb), udptable, skb);
 }
 
 struct sock *udp6_lib_lookup_skb(struct sk_buff *skb,
@@ -294,7 +294,7 @@ struct sock *udp6_lib_lookup_skb(struct sk_buff *skb,
 
 	return __udp6_lib_lookup(dev_net(skb->dev), &iph->saddr, sport,
 				 &iph->daddr, dport, inet6_iif(skb),
-				 &udp_table, NULL);
+				 0,&udp_table, NULL);
 }
 EXPORT_SYMBOL_GPL(udp6_lib_lookup_skb);
 
@@ -309,7 +309,7 @@ struct sock *udp6_lib_lookup(struct net *net, const struct in6_addr *saddr, __be
 	struct sock *sk;
 
 	sk =  __udp6_lib_lookup(net, saddr, sport, daddr, dport,
-				dif, &udp_table, NULL);
+				dif, 0,&udp_table, NULL);
 	if (sk && !atomic_inc_not_zero(&sk->sk_refcnt))
 		sk = NULL;
 	return sk;
@@ -479,7 +479,7 @@ void __udp6_lib_err(struct sk_buff *skb, struct inet6_skb_parm *opt,
 	struct net *net = dev_net(skb->dev);
 
 	sk = __udp6_lib_lookup(net, daddr, uh->dest, saddr, uh->source,
-			       inet6_iif(skb), udptable, NULL);
+			       inet6_iif(skb), 0,udptable, NULL);
 	if (!sk) {
 		__ICMP6_INC_STATS(net, __in6_dev_get(skb->dev),
 				  ICMP6_MIB_INERRORS);
@@ -655,7 +655,7 @@ drop:
 static bool __udp_v6_is_mcast_sock(struct net *net, struct sock *sk,
 				   __be16 loc_port, const struct in6_addr *loc_addr,
 				   __be16 rmt_port, const struct in6_addr *rmt_addr,
-				   int dif, unsigned short hnum)
+				    int dif , int sdif , unsigned short hnum)
 {
 	struct inet_sock *inet = inet_sk(sk);
 

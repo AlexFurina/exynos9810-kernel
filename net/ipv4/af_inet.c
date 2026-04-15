@@ -72,7 +72,6 @@
 #include <linux/types.h>
 #include <linux/socket.h>
 #include <linux/in.h>
-#include <linux/in6.h>
 #include <linux/kernel.h>
 #include <linux/kmod.h>
 #include <linux/sched.h>
@@ -99,16 +98,12 @@
 #include <linux/netdevice.h>
 #include <net/checksum.h>
 #include <net/ip.h>
-#include <net/ipv6.h>
 #include <net/protocol.h>
 #include <net/arp.h>
 #include <net/route.h>
 #include <net/ip_fib.h>
 #include <net/inet_connection_sock.h>
 #include <net/tcp.h>
-#ifdef CONFIG_MPTCP
-#include <net/mptcp.h>
-#endif
 #include <net/udp.h>
 #include <net/udplite.h>
 #include <net/ping.h>
@@ -140,6 +135,8 @@ static inline int current_has_network(void)
 }
 #endif
 
+int sysctl_reserved_port_bind __read_mostly = 1;
+
 /* The inetsw table contains everything that inet_create needs to
  * build a new socket.
  */
@@ -166,11 +163,6 @@ void inet_sock_destruct(struct sock *sk)
 		pr_err("Attempt to release alive inet socket %p\n", sk);
 		return;
 	}
-
-#ifdef CONFIG_MPTCP
-	if (sock_flag(sk, SOCK_MPTCP))
-		mptcp_disable_static_key();
-#endif
 
 	WARN_ON(atomic_read(&sk->sk_rmem_alloc));
 	WARN_ON(atomic_read(&sk->sk_wmem_alloc));
@@ -264,12 +256,8 @@ EXPORT_SYMBOL(inet_listen);
  *	Create an inet socket.
  */
 
-#ifdef CONFIG_MPTCP
-int inet_create(struct net *net, struct socket *sock, int protocol, int kern)
-#else
 static int inet_create(struct net *net, struct socket *sock, int protocol,
 		       int kern)
-#endif
 {
 	struct sock *sk;
 	struct inet_protosw *answer;
@@ -403,18 +391,8 @@ lookup_protocol:
 
 	if (sk->sk_prot->init) {
 		err = sk->sk_prot->init(sk);
-		if (err) {
+		if (err)
 			sk_common_release(sk);
-			goto out;
-		}
-	}
-
-	if (!kern) {
-		err = BPF_CGROUP_RUN_PROG_INET_SOCK(sk);
-		if (err) {
-			sk_common_release(sk);
-			goto out;
-		}
 	}
 out:
 	return err;
@@ -422,6 +400,7 @@ out_rcu_unlock:
 	rcu_read_unlock();
 	goto out;
 }
+
 
 /*
  *	The peer socket should always be NULL (or else). When we call this
@@ -435,6 +414,9 @@ int inet_release(struct socket *sock)
 	if (sk) {
 		long timeout;
 
+#ifdef CONFIG_NETFILTER_XT_MATCH_QTAGUID
+		qtaguid_untag(sock, true);
+#endif
 		/* Applications forget to leave groups before exiting */
 		ip_mc_drop_socket(sk);
 
@@ -458,37 +440,23 @@ EXPORT_SYMBOL(inet_release);
 
 int inet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 {
-	struct sock *sk = sock->sk;
-	int err;
-
-	/* If the socket has its own bind function then use it. (RAW) */
-	if (sk->sk_prot->bind) {
-		return sk->sk_prot->bind(sk, uaddr, addr_len);
-	}
-	if (addr_len < sizeof(struct sockaddr_in))
-		return -EINVAL;
-
-	/* BPF prog is run before any checks are done so that if the prog
-	 * changes context in a wrong way it will be caught.
-	 */
-	err = BPF_CGROUP_RUN_PROG_INET4_BIND(sk, uaddr);
-	if (err)
-		return err;
-
-	return __inet_bind(sk, uaddr, addr_len, false, true);
-}
-EXPORT_SYMBOL(inet_bind);
-
-int __inet_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len,
-		bool force_bind_address_no_port, bool with_lock)
-{
 	struct sockaddr_in *addr = (struct sockaddr_in *)uaddr;
+	struct sock *sk = sock->sk;
 	struct inet_sock *inet = inet_sk(sk);
 	struct net *net = sock_net(sk);
 	unsigned short snum;
 	int chk_addr_ret;
 	u32 tb_id = RT_TABLE_LOCAL;
 	int err;
+
+	/* If the socket has its own bind function then use it. (RAW) */
+	if (sk->sk_prot->bind) {
+		err = sk->sk_prot->bind(sk, uaddr, addr_len);
+		goto out;
+	}
+	err = -EINVAL;
+	if (addr_len < sizeof(struct sockaddr_in))
+		goto out;
 
 	if (addr->sin_family != AF_INET) {
 		/* Compatibility games : accept AF_UNSPEC (mapped to AF_INET)
@@ -532,8 +500,7 @@ int __inet_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len,
 	 *      would be illegal to use them (multicast/broadcast) in
 	 *      which case the sending device address is used.
 	 */
-	if (with_lock)
-		lock_sock(sk);
+	lock_sock(sk);
 
 	/* Check these errors (active socket, double bind). */
 	err = -EINVAL;
@@ -545,18 +512,11 @@ int __inet_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len,
 		inet->inet_saddr = 0;  /* Use device */
 
 	/* Make sure we are allowed to bind here. */
-	if (snum || !(inet->bind_address_no_port ||
-		      force_bind_address_no_port)) {
-		if (sk->sk_prot->get_port(sk, snum)) {
-			inet->inet_saddr = inet->inet_rcv_saddr = 0;
-			err = -EADDRINUSE;
-			goto out_release_sock;
-		}
-		err = BPF_CGROUP_RUN_PROG_INET4_POST_BIND(sk);
-		if (err) {
-			inet->inet_saddr = inet->inet_rcv_saddr = 0;
-			goto out_release_sock;
-		}
+	if ((snum || !inet->bind_address_no_port) &&
+	    sk->sk_prot->get_port(sk, snum)) {
+		inet->inet_saddr = inet->inet_rcv_saddr = 0;
+		err = -EADDRINUSE;
+		goto out_release_sock;
 	}
 
 	if (inet->inet_rcv_saddr)
@@ -569,28 +529,21 @@ int __inet_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len,
 	sk_dst_reset(sk);
 	err = 0;
 out_release_sock:
-	if (with_lock)
-		release_sock(sk);
+	release_sock(sk);
 out:
 	return err;
 }
+EXPORT_SYMBOL(inet_bind);
 
 int inet_dgram_connect(struct socket *sock, struct sockaddr *uaddr,
 		       int addr_len, int flags)
 {
 	struct sock *sk = sock->sk;
-	int err;
 
 	if (addr_len < sizeof(uaddr->sa_family))
 		return -EINVAL;
 	if (uaddr->sa_family == AF_UNSPEC)
 		return sk->sk_prot->disconnect(sk, flags);
-
-	if (BPF_CGROUP_PRE_CONNECT_ENABLED(sk)) {
-		err = sk->sk_prot->pre_connect(sk, uaddr, addr_len);
-		if (err)
-			return err;
-	}
 
 	if (!inet_sk(sk)->inet_num && inet_autobind(sk))
 		return -EAGAIN;
@@ -671,13 +624,6 @@ int __inet_stream_connect(struct socket *sock, struct sockaddr *uaddr,
 		err = -EISCONN;
 		if (sk->sk_state != TCP_CLOSE)
 			goto out;
-
-		if (BPF_CGROUP_PRE_CONNECT_ENABLED(sk)) {
-			err = sk->sk_prot->pre_connect(sk, uaddr, addr_len);
-			if (err)
-				goto out;
-		}
-
 
 		err = sk->sk_prot->connect(sk, uaddr, addr_len);
 		if (err < 0)
@@ -765,23 +711,6 @@ int inet_accept(struct socket *sock, struct socket *newsock, int flags)
 	lock_sock(sk2);
 
 	sock_rps_record_flow(sk2);
-#ifdef CONFIG_MPTCP
-	if (sk2->sk_protocol == IPPROTO_TCP && mptcp(tcp_sk(sk2))) {
-		struct sock *sk_it = sk2;
-
-		mptcp_for_each_sk(tcp_sk(sk2)->mpcb, sk_it)
-			sock_rps_record_flow(sk_it);
-
-		if (tcp_sk(sk2)->mpcb->master_sk) {
-			sk_it = tcp_sk(sk2)->mpcb->master_sk;
-
-			write_lock_bh(&sk_it->sk_callback_lock);
-			sk_it->sk_wq = newsock->wq;
-			sk_it->sk_socket = newsock;
-			write_unlock_bh(&sk_it->sk_callback_lock);
-		}
-	}
-#endif
 	WARN_ON(!((1 << sk2->sk_state) &
 		  (TCPF_ESTABLISHED | TCPF_SYN_RECV |
 		  TCPF_CLOSE_WAIT | TCPF_CLOSE)));
@@ -831,22 +760,20 @@ EXPORT_SYMBOL(inet_getname);
 int inet_sendmsg(struct socket *sock, struct msghdr *msg, size_t size)
 {
 	struct sock *sk = sock->sk;
-	int err;
 
 	sock_rps_record_flow(sk);
 
 	/* We may need to bind the socket. */
 	if (!inet_sk(sk)->inet_num && !sk->sk_prot->no_autobind &&
-		inet_autobind(sk))
+	    inet_autobind(sk))
 		return -EAGAIN;
 
-	err = sk->sk_prot->sendmsg(sk, msg, size);
-	return err;
+	return sk->sk_prot->sendmsg(sk, msg, size);
 }
 EXPORT_SYMBOL(inet_sendmsg);
 
 ssize_t inet_sendpage(struct socket *sock, struct page *page, int offset,
-		size_t size, int flags)
+		      size_t size, int flags)
 {
 	struct sock *sk = sock->sk;
 
@@ -854,7 +781,7 @@ ssize_t inet_sendpage(struct socket *sock, struct page *page, int offset,
 
 	/* We may need to bind the socket. */
 	if (!inet_sk(sk)->inet_num && !sk->sk_prot->no_autobind &&
-		inet_autobind(sk))
+	    inet_autobind(sk))
 		return -EAGAIN;
 
 	if (sk->sk_prot->sendpage)
@@ -874,9 +801,8 @@ int inet_recvmsg(struct socket *sock, struct msghdr *msg, size_t size,
 
 	err = sk->sk_prot->recvmsg(sk, msg, size, flags & MSG_DONTWAIT,
 				   flags & ~MSG_DONTWAIT, &addr_len);
-	if (err >= 0) {
+	if (err >= 0)
 		msg->msg_namelen = addr_len;
-	}
 	return err;
 }
 EXPORT_SYMBOL(inet_recvmsg);
@@ -1027,8 +953,6 @@ const struct proto_ops inet_stream_ops = {
 	.sendpage	   = inet_sendpage,
 	.splice_read	   = tcp_splice_read,
 	.read_sock	   = tcp_read_sock,
-	.sendmsg_locked    = tcp_sendmsg_locked,
-	.sendpage_locked   = tcp_sendpage_locked,
 	.peek_len	   = tcp_peek_len,
 #ifdef CONFIG_COMPAT
 	.compat_setsockopt = compat_sock_common_setsockopt,
@@ -1441,7 +1365,6 @@ struct sk_buff **inet_gro_receive(struct sk_buff **head, struct sk_buff *skb)
 
 	for (p = *head; p; p = p->next) {
 		struct iphdr *iph2;
-		u16 flush_id;
 
 		if (!NAPI_GRO_CB(p)->same_flow)
 			continue;
@@ -1467,34 +1390,23 @@ struct sk_buff **inet_gro_receive(struct sk_buff **head, struct sk_buff *skb)
 
 		NAPI_GRO_CB(p)->flush |= flush;
 
-		/* We need to store of the IP ID check to be included later
-		 * when we can verify that this packet does in fact belong
-		 * to a given flow.
+		/* For non-atomic datagrams we need to save the IP ID offset
+		 * to be included later.  If the frame has the DF bit set
+		 * we must ignore the IP ID value as per RFC 6864.
 		 */
-		flush_id = (u16)(id - ntohs(iph2->id));
+		if (iph2->frag_off & htons(IP_DF))
+			continue;
 
-		/* This bit of code makes it much easier for us to identify
-		 * the cases where we are doing atomic vs non-atomic IP ID
-		 * checks.  Specifically an atomic check can return IP ID
-		 * values 0 - 0xFFFF, while a non-atomic check can only
-		 * return 0 or 0xFFFF.
+		/* We must save the offset as it is possible to have multiple
+		 * flows using the same protocol and address pairs so we
+		 * need to wait until we can validate this is part of the
+		 * same flow with a 5-tuple or better to avoid unnecessary
+		 * collisions between flows.
 		 */
-		if (!NAPI_GRO_CB(p)->is_atomic ||
-		    !(iph->frag_off & htons(IP_DF))) {
-			flush_id ^= NAPI_GRO_CB(p)->count;
-			flush_id = flush_id ? 0xFFFF : 0;
-		}
-
-		/* If the previous IP ID value was based on an atomic
-		 * datagram we can overwrite the value and ignore it.
-		 */
-		if (NAPI_GRO_CB(skb)->is_atomic)
-			NAPI_GRO_CB(p)->flush_id = flush_id;
-		else
-			NAPI_GRO_CB(p)->flush_id |= flush_id;
+		NAPI_GRO_CB(p)->flush_id |= ntohs(iph2->id) ^
+					    (u16)(id - NAPI_GRO_CB(p)->count);
 	}
 
-	NAPI_GRO_CB(skb)->is_atomic = !!(iph->frag_off & htons(IP_DF));
 	NAPI_GRO_CB(skb)->flush |= flush;
 	skb_set_network_header(skb, off);
 	/* The above will be needed by the transport layer if there is one
@@ -1946,11 +1858,6 @@ static int __init inet_init(void)
 	 */
 
 	ip_init();
-
-#ifdef CONFIG_MPTCP
-	/* We must initialize MPTCP before TCP. */
-	mptcp_init();
-#endif
 
 	tcp_v4_init();
 

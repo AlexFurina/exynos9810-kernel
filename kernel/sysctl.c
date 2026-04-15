@@ -1348,15 +1348,15 @@ static struct ctl_table kern_table[] = {
 		.extra2		= &one,
 	},
 #endif
-	{ }
-};
 	{
 		.procname	= "bpf_stats_enabled",
 		.data		= &bpf_stats_enabled_key.key,
 		.maxlen		= sizeof(bpf_stats_enabled_key),
 		.mode		= 0644,
 		.proc_handler	= proc_do_static_key,
-	},
+        },
+        { }
+};
 
 static struct ctl_table vm_table[] = {
 	{

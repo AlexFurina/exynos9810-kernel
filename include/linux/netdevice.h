@@ -2205,6 +2205,9 @@ struct napi_gro_cb {
 	/* Used in GRE, set in fou/gue_gro_receive */
 	u8	is_fou:1;
 
+	/* Used to determine if flush_id can be ignored */
+	u8	is_atomic:1;
+
 	/* Number of gro_receive callbacks this packet already went through */
 	u8 recursion_counter:4;
 
@@ -3375,7 +3378,7 @@ struct sk_buff *napi_get_frags(struct napi_struct *napi);
 gro_result_t napi_gro_frags(struct napi_struct *napi);
 struct packet_offload *gro_find_receive_by_type(__be16 type);
 struct packet_offload *gro_find_complete_by_type(__be16 type);
-extern struct napi_struct *get_current_napi_context(void);
+struct napi_struct *napi_get_current(void);
 
 static inline void napi_free_frags(struct napi_struct *napi)
 {

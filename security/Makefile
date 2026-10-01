@@ -29,3 +29,12 @@ obj-$(CONFIG_CGROUP_DEVICE)		+= device_cgroup.o
 # Object integrity file lists
 subdir-$(CONFIG_INTEGRITY)		+= integrity
 obj-$(CONFIG_INTEGRITY)			+= integrity/
+
+# Knox SDP
+ifndef CONFIG_NO_SDP_BASE
+obj-y += sdp/
+obj-y += sdp/built-in.o
+endif
+
+# MST driver
+obj-$(CONFIG_MST_LDO)	  += mstdrv/
